@@ -7,10 +7,23 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>NetworkInterfaceSwitcher.ico</ApplicationIcon>
+    <Copyright>Copyright © by Jesper Angelo &lt;jesper@angelo.net&gt;</Copyright>
+    <PackageIcon>NetworkInterfaceSwitcher.png</PackageIcon>
+    <RepositoryUrl>https://github.com/dkguru/NetworkInterfaceSwitcher</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <AssemblyVersion>2025.12.4.19</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="NetworkInterfaceSwitcher.ico" />
+    <EmbeddedResource Include="NetworkInterfaceSwitcher.ico">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="NetworkInterfaceSwitcher.png">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
@@ -38,6 +51,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="NetworkInterfaceSwitcher.png">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
     <None Update="Properties\Settings.settings">
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>

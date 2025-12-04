@@ -1,18 +1,22 @@
-﻿using System;
+﻿using Microsoft.Win32;
+using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Management;
+using System.Reflection;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 namespace NetworkInterfaceSwitcher
 {
     public partial class MainForm : Form
     {
+        Version v;
+
         private ComboBox cmbInterface1;
         private ComboBox cmbInterface2;
         private Button btnSwitch;
         private Label lblStatus;
+        private Label lblVersion;
         private Label lblInterface1;
         private Label lblInterface2;
         private Button btnRefresh;
@@ -111,6 +115,19 @@ namespace NetworkInterfaceSwitcher
                 TextAlign = System.Drawing.ContentAlignment.MiddleLeft
             };
 
+            v = Assembly.GetExecutingAssembly().GetName().Version;
+            // txtVersion.Text = $"v{v.Major}.{v.Minor}.{v.Build}.{v.Revision}";
+
+            lblVersion = new Label
+            {
+                //Text = "(Version)",
+                Text = $"v{v.Major}.{v.Minor}.{v.Build}.{v.Revision}",
+                Location = new System.Drawing.Point(20, 235),
+                Size = new System.Drawing.Size(450, 20),
+                BorderStyle = BorderStyle.None,
+                TextAlign = System.Drawing.ContentAlignment.MiddleRight
+            };
+
             this.Controls.Add(lblInterface1);
             this.Controls.Add(cmbInterface1);
             this.Controls.Add(lblInterface1Status);
@@ -122,11 +139,12 @@ namespace NetworkInterfaceSwitcher
             this.Controls.Add(btnSwitch);
             this.Controls.Add(btnRefresh);
             this.Controls.Add(lblStatus);
+            this.Controls.Add(lblVersion);
 
             // Initialize NotifyIcon
             notifyIcon = new NotifyIcon
             {
-                // Icon = new System.Drawing.Icon(GetType(), "NetworkInterfaceSwitcherICO"),
+                // Icon = new System.Drawing.Icon(GetType(), "NetworkInterfaceSwitcher"),
                 Icon = SystemIcons.Application, // You can use a custom icon here
                 Text = "Network Interface Switcher",
                 Visible = false
