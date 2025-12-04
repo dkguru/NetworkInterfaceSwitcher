@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Management;
@@ -17,7 +17,11 @@ namespace NetworkInterfaceSwitcher
         private Label lblInterface2;
         private Button btnRefresh;
 
+        private Label lblInterface1Status;
+        private Label lblInterface2Status;
+
         private NotifyIcon notifyIcon;  // Icon in the system tray
+        private System.Windows.Forms.Timer statusTimer;
 
         // Registry Path for Storing Selection:  HKCU\Software\NetworkInterfaceSwitcher
         private const string RegistryRoot = @"Software\NetworkInterfaceSwitcher";
@@ -47,6 +51,16 @@ namespace NetworkInterfaceSwitcher
                 Size = new System.Drawing.Size(320, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
+            cmbInterface1.SelectedIndexChanged += (s, e) => UpdateInterfaceStatus();
+
+            lblInterface1Status = new Label
+            {
+                Location = new System.Drawing.Point(460, 20),
+                Size = new System.Drawing.Size(20, 20),
+                Text = "●",
+                Font = new System.Drawing.Font("Arial", 12, System.Drawing.FontStyle.Bold),
+                ForeColor = System.Drawing.Color.Gray
+            };
 
             lblInterface2 = new Label
             {
@@ -60,6 +74,16 @@ namespace NetworkInterfaceSwitcher
                 Location = new System.Drawing.Point(130, 60),
                 Size = new System.Drawing.Size(320, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            cmbInterface2.SelectedIndexChanged += (s, e) => UpdateInterfaceStatus();
+
+            lblInterface2Status = new Label
+            {
+                Location = new System.Drawing.Point(460, 60),
+                Size = new System.Drawing.Size(20, 20),
+                Text = "●",
+                Font = new System.Drawing.Font("Arial", 12, System.Drawing.FontStyle.Bold),
+                ForeColor = System.Drawing.Color.Gray
             };
 
             btnSwitch = new Button
@@ -89,8 +113,12 @@ namespace NetworkInterfaceSwitcher
 
             this.Controls.Add(lblInterface1);
             this.Controls.Add(cmbInterface1);
+            this.Controls.Add(lblInterface1Status);
+
             this.Controls.Add(lblInterface2);
             this.Controls.Add(cmbInterface2);
+            this.Controls.Add(lblInterface2Status);
+
             this.Controls.Add(btnSwitch);
             this.Controls.Add(btnRefresh);
             this.Controls.Add(lblStatus);
@@ -115,6 +143,12 @@ namespace NetworkInterfaceSwitcher
 
             // Handle form resize to minimize to tray
             this.Resize += MainForm_Resize;
+
+            // Update timer for status update
+            statusTimer = new System.Windows.Forms.Timer();
+            statusTimer.Interval = 5000; // 5 seconds
+            statusTimer.Tick += (s, e) => UpdateInterfaceStatus();
+            statusTimer.Start();
         }
 
 
@@ -162,6 +196,13 @@ namespace NetworkInterfaceSwitcher
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             SaveSettings();
+
+            // Clean up the system refresh timer
+            if (statusTimer != null)
+            {
+                statusTimer.Stop();
+                statusTimer.Dispose();
+            }
 
             // Clean up the tray icon
             if (notifyIcon != null)
@@ -232,6 +273,7 @@ namespace NetworkInterfaceSwitcher
                 lblStatus.Text = $"Loaded {cmbInterface1.Items.Count} network interfaces";
 
                 LoadSettings();
+                UpdateInterfaceStatus();
             }
             catch (Exception ex)
             {
@@ -240,9 +282,54 @@ namespace NetworkInterfaceSwitcher
             }
         }
 
+        private void UpdateInterfaceStatus()
+        {
+            try
+            {
+                if (cmbInterface1.SelectedItem != null)
+                {
+                    string interface1 = cmbInterface1.SelectedItem.ToString();
+                    bool interface1Enabled = IsInterfaceEnabled(interface1);
+
+                    lblInterface1Status.ForeColor = interface1Enabled
+                        ? System.Drawing.Color.Green
+                        : System.Drawing.Color.Red;
+                    lblInterface1Status.Text = interface1Enabled ? "●" : "●";
+
+                    // Update tooltip
+                    ToolTip tooltip1 = new ToolTip();
+                    tooltip1.SetToolTip(lblInterface1Status,
+                        interface1Enabled ? "Active" : "Disabled");
+                }
+
+                if (cmbInterface2.SelectedItem != null)
+                {
+                    string interface2 = cmbInterface2.SelectedItem.ToString();
+                    bool interface2Enabled = IsInterfaceEnabled(interface2);
+
+                    lblInterface2Status.ForeColor = interface2Enabled
+                        ? System.Drawing.Color.Green
+                        : System.Drawing.Color.Red;
+                    lblInterface2Status.Text = interface2Enabled ? "●" : "●";
+
+                    // Update tooltip
+                    ToolTip tooltip2 = new ToolTip();
+                    tooltip2.SetToolTip(lblInterface2Status,
+                        interface2Enabled ? "Active" : "Disabled");
+                }
+            }
+            catch (Exception ex)
+            {
+                // Silently handle errors in status update
+                lblInterface1Status.ForeColor = System.Drawing.Color.Gray;
+                lblInterface2Status.ForeColor = System.Drawing.Color.Gray;
+            }
+        }
+
         private void BtnRefresh_Click(object sender, EventArgs e)
         {
             LoadNetworkInterfaces();
+            UpdateInterfaceStatus();
         }
 
         private void BtnSwitch_Click(object sender, EventArgs e)
@@ -288,7 +375,7 @@ namespace NetworkInterfaceSwitcher
                 }
 
                 SaveSettings();   // <-- record the last selections
-
+                UpdateInterfaceStatus();
             }
             catch (Exception ex)
             {
