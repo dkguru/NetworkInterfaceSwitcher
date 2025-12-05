@@ -121,7 +121,7 @@ namespace NetworkInterfaceSwitcher
             lblVersion = new Label
             {
                 //Text = "(Version)",
-                Text = $"v{v.Major}.{v.Minor}.{v.Build}.{v.Revision}",
+                Text = $"Created by Jesper Angelo <jesper@angelo.net> | v{v.Major}.{v.Minor}.{v.Build}.{v.Revision}",
                 Location = new System.Drawing.Point(20, 235),
                 Size = new System.Drawing.Size(450, 20),
                 BorderStyle = BorderStyle.None,
