@@ -20,9 +20,24 @@ namespace NetworkInterfaceSwitcher
         [STAThread]
         static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            // If running in an interactive desktop session, start the WinForms UI.
+            // If running as a Windows Service (no interactive session), run the service.
+            if (Environment.UserInteractive)
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new MainForm());
+            }
+            else
+            {
+                // Run as service. To install the service, use sc.exe create or a service installer.
+                System.ServiceProcess.ServiceBase[] ServicesToRun;
+                ServicesToRun = new System.ServiceProcess.ServiceBase[]
+                {
+                    new NetworkInterfaceSwitcher.Service.NetworkInterfaceService()
+                };
+                System.ServiceProcess.ServiceBase.Run(ServicesToRun);
+            }
         }
     }
 

@@ -27,8 +27,9 @@ namespace NetworkInterfaceSwitcher
         private NotifyIcon notifyIcon;  // Icon in the system tray
         private System.Windows.Forms.Timer statusTimer;
 
-        // Registry Path for Storing Selection:  HKCU\Software\NetworkInterfaceSwitcher
-        private const string RegistryRoot = @"Software\NetworkInterfaceSwitcher";
+        // Registry Path for Storing Selection:  HKLM\Software\NetworkInterfaceSwitcher
+        // Note: when running as a Windows Service under LocalSystem the service will read from HKLM.
+        private const string RegistryRoot = @"SOFTWARE\NetworkInterfaceSwitcher";
 
         public MainForm()
         {
@@ -234,6 +235,7 @@ namespace NetworkInterfaceSwitcher
 
         private void LoadSettings()
         {
+            // UI reads settings from HKCU so it doesn't require elevation.
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RegistryRoot))
             {
                 if (key == null) return;   // first run, nothing saved yet
@@ -256,10 +258,26 @@ namespace NetworkInterfaceSwitcher
         
         private void SaveSettings()
         {
+            // Write to HKCU so the UI doesn't require elevation.
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryRoot))
             {
                 key.SetValue("Interface1", cmbInterface1.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
                 key.SetValue("Interface2", cmbInterface2.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
+            }
+
+            // Also attempt to write to HKLM so a service running as LocalSystem can read settings.
+            // If this fails due to lack of privileges, ignore the error to avoid triggering UAC in the UI.
+            try
+            {
+                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(RegistryRoot))
+                {
+                    key.SetValue("Interface1", cmbInterface1.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
+                    key.SetValue("Interface2", cmbInterface2.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
+                }
+            }
+            catch
+            {
+                // ignore - not running elevated, avoid UAC prompt
             }
         }
 
@@ -428,18 +446,24 @@ namespace NetworkInterfaceSwitcher
 
         private void ExecuteNetshCommand(string arguments)
         {
+            // When running as a system service the service account will have the required privileges
+            // so don't request elevation (Verb = "runas") which triggers UAC. Use redirected output.
             ProcessStartInfo psi = new ProcessStartInfo
             {
                 FileName = "netsh",
                 Arguments = arguments,
-                Verb = "runas", // Request admin privileges
-                UseShellExecute = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden
             };
 
             using (Process process = Process.Start(psi))
             {
+                // read output to avoid deadlocks
+                string outStr = process.StandardOutput.ReadToEnd();
+                string errStr = process.StandardError.ReadToEnd();
                 process.WaitForExit();
                 System.Threading.Thread.Sleep(1000); // Wait for interface to change state
             }
@@ -458,13 +482,4 @@ namespace NetworkInterfaceSwitcher
     //}
 }
 
-namespace NetworkInterfaceSwitcher
-{
-    public partial class NetworkInterfaceSwitcher : Form
-    {
-        public NetworkInterfaceSwitcher()
-        {
-            InitializeComponent();
-        }
-    }
-}
+// (Removed duplicate form class named `NetworkInterfaceSwitcher` to avoid type/name collisions with the Service namespace.)
