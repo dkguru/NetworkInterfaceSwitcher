@@ -42,3 +42,17 @@ Service logging
 
 The service writes basic logs to `%ProgramData%\NetworkInterfaceSwitcher\service.log` which can help debugging when Event Log entries are not present.
 
+How to use
+----------
+
+* Run UI (no UAC)
+* Double-click the executable or start from an interactive session — the app starts the WinForms UI as before.
+* Select Interface1 and Interface2 and use the UI to switch. The UI saves to HKCU and attempts to save to HKLM (ignored if not elevated).
+* Install and run service (requires admin/elevation)
+* From elevated PowerShell:
+* Install: .\scripts\install-service.ps1 -ExePath 'C:\full\path\NetworkInterfaceSwitcher.exe'
+* Optional: add -CopyToProgramFiles to copy the exe to Program Files before installing.
+* Optionally pass -Interface1 'NameA' -Interface2 'NameB' to write HKLM config during install.
+* Uninstall: .\scripts\uninstall-service.ps1
+* You can also set config manually or use .\scripts\set-config-hklm.ps1 -Interface1 'NameA' -Interface2 'NameB'.
+* Service name: NetworkInterfaceSwitcherService. It runs as LocalSystem by default and enforces the configured pair periodically.
