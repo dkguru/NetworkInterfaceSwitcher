@@ -1,9 +1,12 @@
 ﻿using Microsoft.Win32;
 using System;
-using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
 using System.Linq;
 using System.Management;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace NetworkInterfaceSwitcher
@@ -258,26 +261,13 @@ namespace NetworkInterfaceSwitcher
         
         private void SaveSettings()
         {
-            // Write to HKCU so the UI doesn't require elevation.
+            // Write to HKCU so the UI doesn't require elevation. This only remembers the user's
+            // dropdown picks across UI runs - the service persists the authoritative HKLM
+            // Interface1/Interface2/ActiveInterface state itself whenever a pipe switch succeeds.
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryRoot))
             {
                 key.SetValue("Interface1", cmbInterface1.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
                 key.SetValue("Interface2", cmbInterface2.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
-            }
-
-            // Also attempt to write to HKLM so a service running as LocalSystem can read settings.
-            // If this fails due to lack of privileges, ignore the error to avoid triggering UAC in the UI.
-            try
-            {
-                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(RegistryRoot))
-                {
-                    key.SetValue("Interface1", cmbInterface1.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
-                    key.SetValue("Interface2", cmbInterface2.SelectedItem?.ToString() ?? string.Empty, RegistryValueKind.String);
-                }
-            }
-            catch
-            {
-                // ignore - not running elevated, avoid UAC prompt
             }
         }
 
@@ -368,7 +358,7 @@ namespace NetworkInterfaceSwitcher
             UpdateInterfaceStatus();
         }
 
-        private void BtnSwitch_Click(object sender, EventArgs e)
+        private async void BtnSwitch_Click(object sender, EventArgs e)
         {
             if (cmbInterface1.SelectedItem == null || cmbInterface2.SelectedItem == null)
             {
@@ -387,38 +377,73 @@ namespace NetworkInterfaceSwitcher
             string interface1 = cmbInterface1.SelectedItem.ToString();
             string interface2 = cmbInterface2.SelectedItem.ToString();
 
+            btnSwitch.Enabled = false;
             lblStatus.Text = "Switching interfaces...";
-            Application.DoEvents();
 
             try
             {
-                // Check current status
-                bool interface1Enabled = IsInterfaceEnabled(interface1);
-                bool interface2Enabled = IsInterfaceEnabled(interface2);
+                // The actual netsh call happens inside the LocalSystem service - this UI process
+                // never touches netsh directly, so no elevation/UAC prompt is ever needed here.
+                string response = await RequestSwitchAsync(interface1, interface2);
 
-                // Perform the switch
-                if (interface1Enabled)
+                if (response != null && response.StartsWith("OK|", StringComparison.Ordinal))
                 {
-                    DisableInterface(interface1);
-                    EnableInterface(interface2);
-                    lblStatus.Text = $"Disabled: {interface1}\nEnabled: {interface2}";
+                    lblStatus.Text = response.Substring("OK|".Length);
+                    SaveSettings();   // <-- record the last selections
+                    UpdateInterfaceStatus();
                 }
                 else
                 {
-                    DisableInterface(interface2);
-                    EnableInterface(interface1);
-                    lblStatus.Text = $"Enabled: {interface1}\nDisabled: {interface2}";
+                    string message = response != null && response.StartsWith("ERROR|", StringComparison.Ordinal)
+                        ? response.Substring("ERROR|".Length)
+                        : "No response from service";
+                    lblStatus.Text = $"Error: {message}";
+                    MessageBox.Show($"Failed to switch interfaces: {message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
-
-                SaveSettings();   // <-- record the last selections
-                UpdateInterfaceStatus();
             }
             catch (Exception ex)
             {
                 lblStatus.Text = $"Error: {ex.Message}";
-                MessageBox.Show($"Error switching interfaces: {ex.Message}\n\n" +
-                    "Make sure you run this application as Administrator!",
-                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Could not reach the NetworkInterfaceSwitcherService: {ex.Message}\n\n" +
+                    "The service must be installed and running to switch interfaces without an " +
+                    "administrator prompt. See README.md for install instructions.",
+                    "Service unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnSwitch.Enabled = true;
+            }
+        }
+
+        private static async Task<string> RequestSwitchAsync(string interface1, string interface2)
+        {
+            using (var pipe = new NamedPipeClientStream(".", SwitchPipeContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous))
+            {
+                // If the service isn't running/listening, fail fast rather than waiting on the
+                // longer response timeout below.
+                using (var connectCts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                {
+                    await pipe.ConnectAsync(connectCts.Token).ConfigureAwait(false);
+                }
+
+                using (var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true, NewLine = "\n" })
+                using (var reader = new StreamReader(pipe, leaveOpen: true))
+                {
+                    // One field per line - an interface name can never be confused with a delimiter.
+                    await writer.WriteLineAsync("SWITCH").ConfigureAwait(false);
+                    await writer.WriteLineAsync(interface1).ConfigureAwait(false);
+                    await writer.WriteLineAsync(interface2).ConfigureAwait(false);
+
+                    // Generous enough to cover the service's own worst-case netsh timeout (up to two
+                    // sequential 15s netsh calls) plus overhead, so we don't time out prematurely
+                    // while the service is still legitimately working.
+                    using (var readCts = new CancellationTokenSource(TimeSpan.FromSeconds(35)))
+                    {
+                        string response = await reader.ReadLineAsync(readCts.Token).ConfigureAwait(false);
+                        return response ?? "ERROR|No response from service";
+                    }
+                }
             }
         }
 
@@ -432,41 +457,6 @@ namespace NetworkInterfaceSwitcher
                 return (ushort)adapter["NetConnectionStatus"] == 2; // 2 = Connected
             }
             return false;
-        }
-
-        private void EnableInterface(string interfaceName)
-        {
-            ExecuteNetshCommand($"interface set interface \"{interfaceName}\" enable");
-        }
-
-        private void DisableInterface(string interfaceName)
-        {
-            ExecuteNetshCommand($"interface set interface \"{interfaceName}\" disable");
-        }
-
-        private void ExecuteNetshCommand(string arguments)
-        {
-            // When running as a system service the service account will have the required privileges
-            // so don't request elevation (Verb = "runas") which triggers UAC. Use redirected output.
-            ProcessStartInfo psi = new ProcessStartInfo
-            {
-                FileName = "netsh",
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-
-            using (Process process = Process.Start(psi))
-            {
-                // read output to avoid deadlocks
-                string outStr = process.StandardOutput.ReadToEnd();
-                string errStr = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-                System.Threading.Thread.Sleep(1000); // Wait for interface to change state
-            }
         }
     }
 
