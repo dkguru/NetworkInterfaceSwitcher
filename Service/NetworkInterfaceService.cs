@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.ServiceProcess;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32;
@@ -90,12 +91,30 @@ namespace NetworkInterfaceSwitcher.Service
 
                     await server.WaitForConnectionAsync(token).ConfigureAwait(false);
 
-                    string request;
                     using (var reader = new StreamReader(server, leaveOpen: true))
                     using (var writer = new StreamWriter(server, leaveOpen: true) { AutoFlush = true, NewLine = "\n" })
                     {
-                        request = await reader.ReadLineAsync().ConfigureAwait(false);
-                        string response = HandleRequest(request);
+                        string response;
+                        using (var requestCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+                        {
+                            // Bound how long a single connected client can take to send its request,
+                            // so a slow/stalled client can't tie up this single-instance pipe forever.
+                            requestCts.CancelAfter(TimeSpan.FromSeconds(10));
+                            try
+                            {
+                                // Protocol is 3 lines: command, interfaceA, interfaceB - one field per
+                                // line, so an interface name can never be confused with a delimiter.
+                                string command = await reader.ReadLineAsync(requestCts.Token).ConfigureAwait(false);
+                                string interfaceA = await reader.ReadLineAsync(requestCts.Token).ConfigureAwait(false);
+                                string interfaceB = await reader.ReadLineAsync(requestCts.Token).ConfigureAwait(false);
+                                response = HandleRequest(command, interfaceA, interfaceB);
+                            }
+                            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                            {
+                                response = "ERROR|Timed out waiting for request";
+                            }
+                        }
+
                         await writer.WriteLineAsync(response).ConfigureAwait(false);
                     }
                 }
@@ -119,10 +138,11 @@ namespace NetworkInterfaceSwitcher.Service
         {
             var security = new PipeSecurity();
 
-            // Any locally logged-on user can request a switch; only this service (LocalSystem)
-            // actually performs the privileged netsh call.
-            var authenticatedUsers = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
-            security.AddAccessRule(new PipeAccessRule(authenticatedUsers, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            // Only interactively logged-on sessions (console or Remote Desktop) can request a switch -
+            // network logons and non-interactive service accounts are excluded. Only this service
+            // (LocalSystem) actually performs the privileged netsh call.
+            var interactiveUsers = new SecurityIdentifier(WellKnownSidType.InteractiveSid, null);
+            security.AddAccessRule(new PipeAccessRule(interactiveUsers, PipeAccessRights.ReadWrite, AccessControlType.Allow));
 
             var localSystem = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
             security.AddAccessRule(new PipeAccessRule(localSystem, PipeAccessRights.FullControl, AccessControlType.Allow));
@@ -133,28 +153,22 @@ namespace NetworkInterfaceSwitcher.Service
             return security;
         }
 
-        private string HandleRequest(string request)
+        private string HandleRequest(string command, string interfaceA, string interfaceB)
         {
-            if (string.IsNullOrWhiteSpace(request))
+            if (string.IsNullOrWhiteSpace(command))
                 return "ERROR|Empty request";
 
-            string[] parts = request.Split('|');
-            if (parts.Length == 3 && parts[0] == "SWITCH")
+            if (!string.Equals(command, "SWITCH", StringComparison.Ordinal))
+                return "ERROR|Unknown command";
+
+            if (string.IsNullOrWhiteSpace(interfaceA) || string.IsNullOrWhiteSpace(interfaceB) ||
+                string.Equals(interfaceA, interfaceB, StringComparison.OrdinalIgnoreCase))
             {
-                string interfaceA = parts[1];
-                string interfaceB = parts[2];
-
-                if (string.IsNullOrWhiteSpace(interfaceA) || string.IsNullOrWhiteSpace(interfaceB) ||
-                    string.Equals(interfaceA, interfaceB, StringComparison.OrdinalIgnoreCase))
-                {
-                    return "ERROR|Invalid interface names";
-                }
-
-                var result = HandleSwitchRequest(interfaceA, interfaceB);
-                return (result.Success ? "OK|" : "ERROR|") + result.Message;
+                return "ERROR|Invalid interface names";
             }
 
-            return "ERROR|Unknown command";
+            var result = HandleSwitchRequest(interfaceA, interfaceB);
+            return (result.Success ? "OK|" : "ERROR|") + result.Message;
         }
 
         private (bool Success, string Message) HandleSwitchRequest(string interfaceA, string interfaceB)
@@ -187,6 +201,12 @@ namespace NetworkInterfaceSwitcher.Service
                     string active = key.GetValue("ActiveInterface") as string;
 
                     if (string.IsNullOrEmpty(iface1) || string.IsNullOrEmpty(iface2)) return;
+
+                    if (string.Equals(iface1, iface2, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"Configured pair is invalid (Interface1 == Interface2 == '{iface1}'); skipping enforcement.");
+                        return;
+                    }
 
                     // Legacy fallback for installs that only ever set Interface1/Interface2 (e.g. via
                     // install-service.ps1) and never went through a pipe-driven switch yet.
@@ -233,15 +253,22 @@ namespace NetworkInterfaceSwitcher.Service
             // Enable the target before disabling the source, to minimize the window where both
             // interfaces are down (important if this service is itself being reached over one of them).
             var enableResult = ExecuteNetshCommand($"interface set interface \"{interfaceToEnable}\" enable");
-            var disableResult = ExecuteNetshCommand($"interface set interface \"{interfaceToDisable}\" disable");
-
             Log($"netsh enable '{interfaceToEnable}': exit={enableResult.ExitCode} stdout={enableResult.StdOut} stderr={enableResult.StdErr}");
+
+            if (enableResult.ExitCode != 0)
+            {
+                // Don't touch interfaceToDisable if the target never came up - leaving the
+                // original interface enabled is safer than ending up with neither enabled.
+                return (false, $"netsh failed to enable '{interfaceToEnable}' (exit={enableResult.ExitCode}); left '{interfaceToDisable}' untouched");
+            }
+
+            var disableResult = ExecuteNetshCommand($"interface set interface \"{interfaceToDisable}\" disable");
             Log($"netsh disable '{interfaceToDisable}': exit={disableResult.ExitCode} stdout={disableResult.StdOut} stderr={disableResult.StdErr}");
 
-            bool success = enableResult.ExitCode == 0 && disableResult.ExitCode == 0;
+            bool success = disableResult.ExitCode == 0;
             string message = success
                 ? $"Enabled: {interfaceToEnable}; Disabled: {interfaceToDisable}"
-                : $"netsh failed (enable exit={enableResult.ExitCode}, disable exit={disableResult.ExitCode})";
+                : $"Enabled '{interfaceToEnable}' but failed to disable '{interfaceToDisable}' (exit={disableResult.ExitCode})";
 
             return (success, message);
         }
@@ -279,6 +306,8 @@ namespace NetworkInterfaceSwitcher.Service
             catch { }
             return false;
         }
+        private const int NetshTimeoutMilliseconds = 15000;
+
         private (int ExitCode, string StdOut, string StdErr) ExecuteNetshCommand(string arguments)
         {
             try
@@ -293,12 +322,28 @@ namespace NetworkInterfaceSwitcher.Service
                     CreateNoWindow = true
                 };
 
-                using (Process process = Process.Start(psi))
+                var stdOut = new StringBuilder();
+                var stdErr = new StringBuilder();
+
+                using (Process process = new Process { StartInfo = psi })
                 {
-                    string outStr = process.StandardOutput.ReadToEnd();
-                    string errStr = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
-                    return (process.ExitCode, outStr, errStr);
+                    // Read output asynchronously via events (not ReadToEnd) so a hung/silent netsh
+                    // process can't block this thread before we ever get to the WaitForExit timeout.
+                    process.OutputDataReceived += (s, e) => { if (e.Data != null) stdOut.AppendLine(e.Data); };
+                    process.ErrorDataReceived += (s, e) => { if (e.Data != null) stdErr.AppendLine(e.Data); };
+
+                    process.Start();
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    if (!process.WaitForExit(NetshTimeoutMilliseconds))
+                    {
+                        Log($"netsh timed out after {NetshTimeoutMilliseconds}ms, killing process: {arguments}");
+                        try { process.Kill(entireProcessTree: true); } catch (Exception killEx) { Log("Failed to kill timed-out netsh process: " + killEx); }
+                        return (-1, stdOut.ToString(), $"netsh timed out after {NetshTimeoutMilliseconds}ms");
+                    }
+
+                    return (process.ExitCode, stdOut.ToString(), stdErr.ToString());
                 }
             }
             catch (Exception ex)

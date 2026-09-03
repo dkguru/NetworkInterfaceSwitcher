@@ -26,8 +26,9 @@ Switching without a UAC prompt
 
 The UI never calls `netsh` itself and never requests elevation. Instead, clicking "Switch Interfaces"
 sends a request over a local named pipe (`NetworkInterfaceSwitcherPipe`) to the installed service, which
-runs as LocalSystem and performs the actual `netsh` call. Any locally logged-on user can send a request;
-only the service can act on it, so no UAC prompt is ever shown to the user - but this also means
+runs as LocalSystem and performs the actual `netsh` call. Any interactively logged-on session (console or
+Remote Desktop) can send a request - network logons and non-interactive service accounts are excluded -
+and only the service can act on it, so no UAC prompt is ever shown to the user. This also means
 **switching only works while the service is installed and running**. If the service isn't running, the UI
 shows an error explaining that instead of silently failing.
 
@@ -48,8 +49,9 @@ Helper scripts
 - `scripts/install-service.ps1` - Installs the service. Options:
   - `-CopyToProgramFiles` copy the executable into Program Files before installing
   - `-Interface1` and `-Interface2` optionally set initial HKLM configuration
+  - `-ActiveInterface` optionally states which of the two should be enforced as enabled (defaults to `-Interface1` if omitted)
 - `scripts/uninstall-service.ps1` - Stops and deletes the service
-- `scripts/set-config-hklm.ps1` - Writes `Interface1`/`Interface2` to HKLM and restarts the service (requires elevation)
+- `scripts/set-config-hklm.ps1` - Writes `Interface1`/`Interface2`/`ActiveInterface` to HKLM and restarts the service (requires elevation)
 
 Service logging
 ---------------

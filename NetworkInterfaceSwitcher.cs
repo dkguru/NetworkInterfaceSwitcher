@@ -419,16 +419,30 @@ namespace NetworkInterfaceSwitcher
         private static async Task<string> RequestSwitchAsync(string interface1, string interface2)
         {
             using (var pipe = new NamedPipeClientStream(".", SwitchPipeContract.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous))
-            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
             {
-                await pipe.ConnectAsync(cts.Token).ConfigureAwait(false);
+                // If the service isn't running/listening, fail fast rather than waiting on the
+                // longer response timeout below.
+                using (var connectCts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                {
+                    await pipe.ConnectAsync(connectCts.Token).ConfigureAwait(false);
+                }
 
                 using (var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true, NewLine = "\n" })
                 using (var reader = new StreamReader(pipe, leaveOpen: true))
                 {
-                    await writer.WriteLineAsync($"SWITCH|{interface1}|{interface2}").ConfigureAwait(false);
-                    string response = await reader.ReadLineAsync().ConfigureAwait(false);
-                    return response ?? "ERROR|No response from service";
+                    // One field per line - an interface name can never be confused with a delimiter.
+                    await writer.WriteLineAsync("SWITCH").ConfigureAwait(false);
+                    await writer.WriteLineAsync(interface1).ConfigureAwait(false);
+                    await writer.WriteLineAsync(interface2).ConfigureAwait(false);
+
+                    // Generous enough to cover the service's own worst-case netsh timeout (up to two
+                    // sequential 15s netsh calls) plus overhead, so we don't time out prematurely
+                    // while the service is still legitimately working.
+                    using (var readCts = new CancellationTokenSource(TimeSpan.FromSeconds(35)))
+                    {
+                        string response = await reader.ReadLineAsync(readCts.Token).ConfigureAwait(false);
+                        return response ?? "ERROR|No response from service";
+                    }
                 }
             }
         }
